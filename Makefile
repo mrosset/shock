@@ -1,13 +1,13 @@
 include $(GOROOT)/src/Make.inc
 
-TARG=skel
-GOFILES=skel.go
+TARG=shock
+GOFILES=shock.go twitter.go git.go shell.go
 GOFMT=gofmt -l -w
 
 include $(GOROOT)/src/Make.cmd
 
-test: format clean all
-	./${TARG}
+test: all
+	./shock -s
 
 format:
 	${GOFMT} .

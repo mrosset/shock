@@ -1,0 +1,81 @@
+<style type="text/css">
+<!--
+div.scroll {
+height: 600px;
+width: 600px;
+overflow: auto;
+border: 1px solid #666;
+background-color: #ccc;
+padding: 8px;
+}
+
+.success {
+color: green;
+}
+
+.close {
+color: red;
+}
+-->
+</style>
+
+<script type="text/javascript">
+
+var	ws;
+
+function load() {	
+
+	output.style.width  = document.body.clientWidth - 100;
+	output.style.height = document.body.clientHeight -100;
+
+	ws = new WebSocket("ws://localhost:8080/console");
+
+	ws.onopen = function () {
+		state.className = 'success';
+		state.innerHTML = 'Socket open';
+		console.log('CONNECTED');
+	};
+
+	ws.onmessage = function (evt) {
+		console.log("MESSAGE");
+		writeToScreen(evt.data);
+	};
+
+	ws.onclose = function() { 
+		state.className = 'close';
+		state.innerHTML = 'Socket closed';
+		console.log("CLOSED");
+	};
+
+	ws.onerror = function(evt) {
+		console.log("ERROR: "+evt.data);	 
+	};
+}
+
+function writeToScreen(message) {
+	var pre = document.createElement("pre");
+	pre.style.wordWrap = "break-word";
+	pre.innerHTML = message;
+	output.appendChild(pre);
+	h = output.scrollHeight;
+	output.scrollTop = h;
+}
+
+function send(msg) {
+	console.log('sending message');
+	ws.send(msg);
+}
+
+window.addEventListener("load", load, false);
+//var int=self.setInterval(send("stuff\n"),1000);
+
+</script>
+<div id='output' class='scroll'></div>
+<div id='state' class='status'><p>status</p></div>
+<button onclick='load()'>connect</button>
+<button onclick='ws.close()'>stop</button>
+<button onclick='output.innerHTML=""'>clear</button>
+
+<script language=javascript>
+//var int=self.setInterval("send(Date())",1000);
+</script>
