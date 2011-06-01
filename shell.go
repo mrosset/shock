@@ -3,25 +3,30 @@ package main
 import (
 	"exec"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
 )
 
 type Shell struct {
-	running bool
-	tick    <-chan int64
-	name    string
-	path    string
-	args    string
+	running  bool
+	tick     <-chan int64
+	Interval int64
+	Command  string
+	Label    string
+	Path     string
+	Args     string
 }
 
-func NewShell(tick int64, name, args, path string) *Shell {
+func NewShell(tick int64, label, command, args, path string) *Shell {
 	g := &Shell{
-		tick: time.Tick(tick),
-		name: name,
-		args: args,
-		path: path,
+		tick:     time.Tick(tick),
+		Interval: tick,
+		Label:    label,
+		Command:  command,
+		Args:     args,
+		Path:     path,
 	}
 	return g
 }
@@ -33,24 +38,27 @@ func (v *Shell) Tick() <-chan int64 {
 func (v *Shell) Run() os.Error {
 	v.running = true
 	defer func() { v.running = false }()
-	cmd := exec.Command(v.name, strings.Fields(v.args)...)
-	cmd.Dir = v.path
+	cmd := exec.Command(v.Command, strings.Fields(v.Args)...)
+	if cmd.Args[0] == "nil" {
+		cmd.Args = nil
+	}
+	cmd.Dir = v.Path
 	output, err := cmd.Output()
 	if err != nil {
-		return os.NewError(err.String() + output)
+		log.Print(err.String() + string(output))
+		return os.NewError(err.String() + string(output))
 	}
-	if output != "" {
-		line := strings.Split(output, "\n", -1)
-		msg := fmt.Sprintf("%v %v more", line[0], len(line))
-		if !contains(msg) {
-			alerts.queue.Push(msg)
+	if string(output) != "" {
+		lines := strings.Split(string(output), "\n", -1)
+		if !alerts.Contains(lines[0]) {
+			alerts.PushFront(NewNotice(v.Label, lines[0]))
 		}
 	}
 	return nil
 }
 
 func (v *Shell) String() string {
-	return fmt.Sprintf("%s in %s", v.name, v.path)
+	return fmt.Sprintf("%-10.10s %-20.20s in %-20.20s status %-20.20v", v.Label, v.Command, v.Path, v.running)
 }
 
 func (v *Shell) IsRunning() bool {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"container/list"
 	"container/vector"
 	"flag"
@@ -17,42 +18,40 @@ import (
 )
 
 const (
-	SECOND = 1e09
-	MINUTE = SECOND * 60
-	HOUR   = MINUTE * 60
-	DAY    = HOUR * 24
+	SECONDS = 1e09
+	MINUTES = SECONDS * 60
+	HOURS   = MINUTES * 60
+	DAYS    = HOURS * 24
 )
 
 var (
 	isServer   = flag.Bool("s", false, "start in server mode")
 	isClient   = flag.Bool("c", true, "start in client mode")
 	isReciever = flag.Bool("r", false, "recieve message count")
-	isDump     = flag.Bool("d", false, "dump messages")
+	isVerbose  = flag.Bool("v", false, "reciver use more verbose output")
 	ts         = new(TaskServer)
-	con        = &connection{"tcp", "localhost:8080"}
+	con        = &connection{"unix", "/tmp/shock"}
 	stop       = make(chan bool)
 	alerts     = new(Notify)
-	//con        = &connection{"unix", "/tmp/shock"}
+	taskConfig = filepath.Join(os.Getenv("HOME"), ".shock/tasks")
+	//con        = &connection{"tcp", "localhost:8080"}
 	//socket     = "localhost:8080"
 )
 
 func init() {
-	log.SetFlags(log.Lshortfile | log.Ltime)
-	log.SetPrefix("shock: ")
+	log.SetFlags(log.Lshortfile)
 }
 
 func main() {
 	flag.Parse()
-	f, err := os.Create("/home/strings/shock.log")
-	output := io.MultiWriter(f, os.Stderr)
-	if err != nil {
-		fmt.Println(err)
-	}
-	defer f.Close()
-
-	log.SetOutput(output)
-
 	if *isServer {
+		lfile, err := os.Create(filepath.Join(os.Getenv("HOME"), ".shock.log"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer lfile.Close()
+		output := io.MultiWriter(lfile, alerts)
+		log.SetOutput(output)
 		server()
 		os.Exit(0)
 	}
@@ -81,19 +80,9 @@ func server() {
 		log.Fatal(e)
 	}
 	go http.Serve(l, nil)
-	ts.PushFront(NewShell(MINUTE*30, "git", "fetch", "/home/strings/go"))
-	ts.PushFront(NewShell(SECOND*30, "bti", "--user mikerosset --action friends", "/home/strings/go"))
-	repos, err := filepath.Glob("/home/strings/github/*")
-	if err != nil {
-		log.Print(err)
-	}
-	for _, r := range repos {
-		if filepath.Base(r)[0] != '.' {
-			log.Println("adding", r)
-			st := NewShell(MINUTE*30, "git", "fetch", r)
-			ts.PushFront(st)
-			go st.Run()
-		}
+	if err := ts.LoadTasks(); err != nil {
+		fmt.Print(err)
+		log.Fatal(err)
 	}
 	log.Println("server started")
 	ts.Run()
@@ -105,7 +94,7 @@ func recieve() {
 		log.Fatal(err)
 	}
 	var message string
-	err = client.Call("Notify.Last", "", &message)
+	err = client.Call("Notify.Last", *isVerbose, &message)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -136,7 +125,6 @@ func client() {
 	client.Close()
 }
 
-// Tasks 
 type TaskServer struct {
 	list.List
 }
@@ -146,7 +134,7 @@ func (v *TaskServer) Tasks() []string {
 	for e := v.Front(); e != nil; e = e.Next() {
 		switch t := e.Value.(type) {
 		case Task:
-			vector.Push(fmt.Sprintf("%-40.40v running: %v", t, t.IsRunning()))
+			vector.Push(fmt.Sprintf("%v", t))
 		default:
 			vector.Push(fmt.Sprintf("%T is unknown", t))
 		}
@@ -154,8 +142,7 @@ func (v *TaskServer) Tasks() []string {
 	return vector.Copy()
 }
 
-
-// Pulse all tasks once a Second
+// Pulse all tasks once a second
 func (v *TaskServer) Run() {
 	tick := time.Tick(1e09)
 	for {
@@ -173,7 +160,6 @@ func (v *TaskServer) Pulse() {
 		case Task:
 			select {
 			case <-t.Tick():
-				log.Printf("running %v", t)
 				if !t.IsRunning() {
 					go func() {
 						if err := t.Run(); err != nil {
@@ -182,7 +168,6 @@ func (v *TaskServer) Pulse() {
 					}()
 				}
 			default:
-				//log.Printf("derp %v", t)
 			}
 		default:
 			log.Printf(fmt.Sprintf("%T is unknown", t))
@@ -190,54 +175,189 @@ func (v *TaskServer) Pulse() {
 	}
 }
 
-// Notify
-type Notify struct {
-	queue vector.StringVector
-}
-
-func (v *Notify) Len(n string, reply *int) os.Error {
-	*reply = v.queue.Len()
+func (v *TaskServer) LoadTasks() os.Error {
+	f, err := os.Open(taskConfig)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	buf := bufio.NewReader(f)
+	for {
+		line, _, err := buf.ReadLine()
+		if err == os.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if line[0] != '#' {
+			t := new(Shell)
+			_, err := fmt.Sscanf(string(line), "%d %s %s %s %s\n", &t.Interval, &t.Label, &t.Command, &t.Args, &t.Path)
+			if err != nil {
+				return err
+			}
+			t.Interval = t.Interval * MINUTES
+			t.tick = time.Tick(t.Interval)
+			t.Args = strings.Replace(t.Args, ",", " ", -1)
+			go func() {
+				err := t.Run()
+				if err != nil {
+					log.Print(err)
+				}
+			}()
+			v.PushFront(t)
+		}
+	}
 	return nil
 }
 
-func (v *Notify) Last(n string, message *string) os.Error {
-	if v.queue.Len() == 0 {
+func (v *TaskServer) SaveTasks() os.Error {
+	f, err := os.Create(taskConfig)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	header :=
+		`# shell arguements should have spaces escaped with a , if there are no arguements use nil
+#
+# minutes label command comma,delimited,arguement path
+`
+
+	f.Write([]byte(header))
+	for e := v.Front(); e != nil; e = e.Next() {
+		t := e.Value.(*Shell)
+		s := fmt.Sprintf("%03d %s %s %s %s\n", t.Interval/MINUTES, t.Label, t.Command, strings.Replace(t.Args, " ", ",", -1), t.Path)
+		f.Write([]byte(s))
+	}
+	return nil
+}
+
+type Notice struct {
+	label   string
+	message string
+	read    bool
+}
+
+func NewNotice(label, message string) *Notice {
+	return &Notice{label: label, message: message}
+}
+
+func (v *Notice) String() string {
+	return fmt.Sprintf("%-10.10s %-70.70s...", v.label+":", v.message)
+}
+
+// Notify
+type Notify struct {
+	list.List
+}
+
+// This extends list.List to iterate and call a function on each Notice
+func (v *Notify) Each(f func(*Notice)) os.Error {
+	for e := v.Front(); e != nil; e = e.Next() {
+		switch t := e.Value.(type) {
+		case *Notice:
+			f(t)
+		default:
+			log.Printf("%T = %v", t, t)
+		}
+	}
+	return nil
+}
+
+func (v *Notify) Contains(s string) (contains bool) {
+	v.Each(
+		func(n *Notice) {
+			if n.message == s {
+				contains = true
+			}
+		})
+	return
+}
+
+func (v *Notify) Write(b []byte) (n int, err os.Error) {
+	m := NewNotice("shock", string(b[:len(b)-1]))
+	v.PushFront(m)
+	return 0, nil
+}
+
+func (v *Notify) Total(n string, reply *int) os.Error {
+	*reply = v.Len()
+	return nil
+}
+
+// TODO: this method should walk back and find the last unread message
+func (v *Notify) Last(verbose *bool, message *string) os.Error {
+	count := 0
+	v.Each(func(n *Notice) {
+		if !n.read {
+			count++
+		}
+	})
+
+	if v.Len() == 0 && *verbose {
 		*message = "shock: 0 messages"
 		return nil
 	}
-	*message = fmt.Sprintf("%s total: %v last: %s", log.Prefix(), v.queue.Len(), v.queue.Last())
+
+	n := v.Front().Value.(*Notice)
+	if !n.read {
+		*message = fmt.Sprintf("%s total: %v last: %s", log.Prefix(), count, n.message)
+		return nil
+	}
+	if *verbose {
+		*message = "shock: 0 messages"
+	}
 	return nil
 }
 
-func (n *Notify) Push(m string, reply *[]string) os.Error {
-	n.queue.Push(m)
+// TODO: impliment cleint pushing
+func (v *Notify) Push(m string, reply *[]string) os.Error {
+	notice := new(Notice)
+	notice.message = m
+	notice.label = "client"
+	v.PushFront(notice)
 	return nil
 }
 
-func (n *Notify) List(m string, reply *[]string) os.Error {
-	*reply = ([]string)(alerts.queue.Copy())
+// returns all unread notices
+func (v *Notify) Notices(m string, reply *[]string) os.Error {
+	vector := new(vector.StringVector)
+	v.Each(func(n *Notice) {
+		if !n.read {
+			vector.Push(n.String())
+		}
+	})
+	*reply = ([]string)(vector.Copy())
 	return nil
 }
 
-func (n *Notify) Tasks(m string, reply *[]string) os.Error {
+// rpc call to return tasks
+func (v *Notify) Tasks(m string, reply *[]string) os.Error {
 	*reply = ts.Tasks()
 	return nil
 }
 
-func (n *Notify) MarkRead(m string, reply *bool) os.Error {
-	alerts.queue.Cut(0, alerts.queue.Len())
+// mark all notices read
+func (v *Notify) MarkRead(m string, reply *[]string) os.Error {
+	v.Each(func(n *Notice) {
+		n.read = true
+	})
 	return nil
 }
 
-func (n *Notify) StopServer(m string, reply *bool) os.Error {
+func (v *Notify) Dump(m string, reply *[]string) os.Error {
+	vector := new(vector.StringVector)
+	v.Each(func(n *Notice) {
+		vector.Push(fmt.Sprintf("%#v", n))
+	})
+	*reply = ([]string)(vector.Copy())
+	return nil
+}
+
+// stop the server
+func (n *Notify) StopServer(m string, reply *[]string) os.Error {
 	stop <- true
-	return nil
-}
-
-func (n *Notify) Test(m string, reply *[]string) os.Error {
-	for i := 0; i < 100; i++ {
-		alerts.queue.Push(fmt.Sprintf("%v", i))
-	}
 	return nil
 }
 
@@ -247,14 +367,4 @@ type Task interface {
 	Run() os.Error
 	String() string
 	Tick() <-chan int64
-}
-
-func contains(s string) bool {
-	var c bool
-	alerts.queue.Do(func(e string) {
-		if e == s {
-			c = true
-		}
-	})
-	return c
 }

@@ -1,7 +1,7 @@
 include $(GOROOT)/src/Make.inc
 
 TARG=shock
-GOFILES=shock.go twitter.go git.go shell.go
+GOFILES=shock.go shell.go
 GOFMT=gofmt -l -w
 
 include $(GOROOT)/src/Make.cmd
